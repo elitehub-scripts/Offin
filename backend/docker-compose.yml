@@ -1,0 +1,43 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_change_me
+      MYSQL_DATABASE: worldlink
+      MYSQL_USER: worldlink
+      MYSQL_PASSWORD: worldlink_change_me
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "3306:3306"
+
+  backend:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    environment:
+      PORT: "8080"
+      DB_DRIVER: "mysql"
+      MYSQL_HOST: "mysql"
+      MYSQL_PORT: "3306"
+      MYSQL_USER: "worldlink"
+      MYSQL_PASSWORD: "worldlink_change_me"
+      MYSQL_DATABASE: "worldlink"
+      STUN_URL: "stun:stun.l.google.com:19302"
+      TURN_URL: "turn:YOUR_PUBLIC_SERVER_IP:3478"
+      COTURN_SHARED_SECRET: "REPLACE_WITH_STRONG_RANDOM_SECRET"
+    ports:
+      - "8080:8080"
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./turn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+volumes:
+  mysql_data:

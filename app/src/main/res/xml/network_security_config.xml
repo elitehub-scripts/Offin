@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Production deployments should always use HTTPS / WSS.
+         Cleartext is permitted for local/LAN self-hosted development servers (e.g., 10.0.2.2, localhost, 192.168.x.x). -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

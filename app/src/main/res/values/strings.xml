@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">WorldLink</string>
+    <string name="app_tagline">Global &amp; Nearby Communication. Zero SIM. Zero Email.</string>
+
+    <!-- Navigation -->
+    <string name="nav_chats">Chats</string>
+    <string name="nav_calls">Calls</string>
+    <string name="nav_contacts">Contacts</string>
+    <string name="nav_screenshare">Screen</string>
+    <string name="nav_nearby">Nearby</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_title">One Username.\nEvery Border.</string>
+    <string name="onboarding_subtitle">Global voice, video, messaging &amp; screen sharing over Wi-Fi — plus offline nearby mode. No phone number, email, or password required.</string>
+    <string name="username_label">Choose your unique @username</string>
+    <string name="username_hint">e.g. Mahid_2026</string>
+    <string name="display_name_label">Display Name (optional)</string>
+    <string name="display_name_hint">How friends see you</string>
+    <string name="create_identity_cta">Claim Username &amp; Continue</string>
+    <string name="restore_identity_cta">Recover Existing Identity</string>
+    <string name="server_config_cta">Configure Server</string>
+
+    <!-- Errors & Empty States -->
+    <string name="error_username_invalid">Use 3–24 letters, numbers, or underscores.</string>
+    <string name="error_username_taken">That @username is already claimed globally.</string>
+    <string name="empty_chats_title">No conversations yet</string>
+    <string name="empty_chats_body">Search a @username in Contacts or switch to Nearby to message devices around you without internet.</string>
+    <string name="empty_calls_title">No call history</string>
+    <string name="empty_calls_body">Start a global Wi-Fi voice, video, or screen-share call from Contacts or any chat thread.</string>
+
+    <!-- Notifications -->
+    <string name="channel_calls_name">Incoming &amp; Active Calls</string>
+    <string name="channel_messages_name">Real-time Messages</string>
+    <string name="channel_screenshare_name">Live Screen Sharing</string>
+</resources>

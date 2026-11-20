@@ -1,0 +1,6 @@
+{
+  "name": "WorldLink",
+  "description": "SIM-free global WebRTC voice, video, screen sharing, real-time messaging, and offline nearby communication app powered by unique usernames.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
