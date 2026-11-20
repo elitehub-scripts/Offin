@@ -32,7 +32,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Devices
@@ -313,7 +312,7 @@ fun NearbyTab(
     peers: List<NearbyPeer>,
     selectedPeer: NearbyPeer?,
     nearbyMessages: List<NearbyMessageEntity>,
-    onStartDiscovery: (hasWifi: Boolean, hasBle: Boolean) -> Unit,
+    onStartDiscovery: (hasWifi: Boolean) -> Unit,
     onStopDiscovery: () -> Unit,
     onSelectPeer: (NearbyPeer?) -> Unit,
     onConnectPeer: (NearbyPeer) -> Unit,
@@ -329,20 +328,11 @@ fun NearbyTab(
             hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
-    val checkBlePerm: () -> Boolean = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            hasPermission(context, Manifest.permission.BLUETOOTH_SCAN) &&
-                hasPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) &&
-                hasPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            true
-        }
-    }
 
     val permLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        onStartDiscovery(checkWifiPerm(), checkBlePerm())
+        onStartDiscovery(checkWifiPerm())
     }
 
     if (selectedPeer != null) {
@@ -384,9 +374,9 @@ fun NearbyTab(
                 ) {
                     Icon(Icons.Default.WifiOff, contentDescription = null, tint = EmeraldSignal)
                     Column {
-                        Text("Offline Nearby Mode", style = MaterialTheme.typography.titleMedium)
+                        Text("Offline Wi-Fi Nearby (Zero Bluetooth)", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "Communicate without internet using Wi-Fi Direct, Local Wi-Fi mDNS, and BLE discovery. Strictly limited to local wireless range — cannot reach other countries without internet.",
+                            text = "Communicate without internet or Bluetooth via Wi-Fi Direct and Local Wi-Fi mDNS (~30–100m range). To call another country without any server, connect over Wi-Fi using Direct P2P Link in Contacts.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -436,19 +426,17 @@ fun NearbyTab(
                         if (!isScanning) {
                             Button(
                                 onClick = {
-                                    val w = checkWifiPerm()
-                                    val b = checkBlePerm()
-                                    if (w && b) {
-                                        onStartDiscovery(true, true)
+                                    if (checkWifiPerm()) {
+                                        onStartDiscovery(true)
                                     } else {
                                         permLauncher.launch(nearbyPermissions)
                                     }
                                 },
                                 modifier = Modifier.testTag("nearby_start_scan_button")
                             ) {
-                                Icon(Icons.Default.BluetoothSearching, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Scan Nearby Devices")
+                                Text("Scan Wi-Fi Nearby")
                             }
                         } else {
                             OutlinedButton(
@@ -486,9 +474,9 @@ fun NearbyTab(
                         Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Text(
                             text = if (isScanning) {
-                                "Listening for WorldLink peers on Wi-Fi Direct, same Wi-Fi/Hotspot mDNS, and BLE..."
+                                "Listening for WorldLink peers on Wi-Fi Direct & same Wi-Fi/Hotspot mDNS (Bluetooth not used)..."
                             } else {
-                                "Tap 'Scan Nearby Devices' on two nearby Android devices to discover and chat offline."
+                                "Tap 'Scan Wi-Fi Nearby' on two nearby Android devices to discover and chat offline."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -506,7 +494,6 @@ fun NearbyTab(
                 val transportLabel = when (peer.transport) {
                     NearbyTransport.LAN_NSD -> "Local Wi-Fi"
                     NearbyTransport.WIFI_DIRECT -> "Wi-Fi Direct"
-                    NearbyTransport.BLE_BEACON -> "BLE Proximity"
                 }
                 Surface(
                     shape = RoundedCornerShape(18.dp),
@@ -532,7 +519,7 @@ fun NearbyTab(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("@${peer.username}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             Text(
-                                text = "$transportLabel • $rangeLabel" + (peer.rssiDbm?.let { " (${it} dBm)" } ?: ""),
+                                text = "$transportLabel • $rangeLabel",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = rangeColor
                             )

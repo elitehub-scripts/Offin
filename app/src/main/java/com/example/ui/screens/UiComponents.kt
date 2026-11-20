@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -111,10 +112,12 @@ fun UserAvatar(
 fun ConnectionStatusPill(
     signalingState: SignalingConnectionState,
     hasInternet: Boolean,
+    useBackendServer: Boolean = false,
     onClick: () -> Unit
 ) {
     val (label, tint, icon) = when {
-        !hasInternet -> Triple("Offline", CoralAlert, Icons.Default.CloudOff)
+        !hasInternet -> Triple("Offline Nearby", CoralAlert, Icons.Default.CloudOff)
+        !useBackendServer -> Triple("In-App + P2P", EmeraldSignal, Icons.Default.CloudDone)
         signalingState == SignalingConnectionState.CONNECTED -> Triple("Global Live", EmeraldSignal, Icons.Default.CloudDone)
         signalingState == SignalingConnectionState.CONNECTING ||
             signalingState == SignalingConnectionState.RECONNECTING -> Triple("Syncing", AmberWarn, Icons.Default.Sync)
@@ -150,8 +153,9 @@ fun ServerConfigDialog(
     currentPrefs: AppPreferences,
     statusNote: String?,
     onDismiss: () -> Unit,
-    onSaveAndTest: (serverUrl: String, stunUrl: String, turnUrl: String, turnUser: String, turnPass: String) -> Unit
+    onSaveAndTest: (serverUrl: String, stunUrl: String, turnUrl: String, turnUser: String, turnPass: String, useBackendServer: Boolean) -> Unit
 ) {
+    var useBackendServer by remember(currentPrefs.useBackendServer) { mutableStateOf(currentPrefs.useBackendServer) }
     var serverUrl by remember(currentPrefs.serverBaseUrl) { mutableStateOf(currentPrefs.serverBaseUrl) }
     var stunUrl by remember(currentPrefs.stunUrl) { mutableStateOf(currentPrefs.stunUrl) }
     var turnUrl by remember(currentPrefs.turnUrl) { mutableStateOf(currentPrefs.turnUrl) }
@@ -161,40 +165,54 @@ fun ServerConfigDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Default.Dns, contentDescription = null) },
-        title = { Text("Server & WebRTC ICE Config") },
+        title = { Text("Storage & WebRTC ICE Config") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "Point WorldLink to your self-hosted backend (REST + WebSocket) and optional Coturn TURN relay.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                OutlinedTextField(
-                    value = serverUrl,
-                    onValueChange = { serverUrl = it },
-                    label = { Text("Backend Server URL") },
-                    placeholder = { Text("https://worldlink.yourdomain.com") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("server_url_input")
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { serverUrl = "http://10.0.2.2:8080" },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Emulator", style = MaterialTheme.typography.labelSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Use Optional Backend Server", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = if (useBackendServer) "Syncs with your self-hosted backend" else "Off: saves profile, contacts & chats in-app only",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    OutlinedButton(
-                        onClick = { serverUrl = "http://192.168.1.100:8080" },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("LAN Preset", style = MaterialTheme.typography.labelSmall)
+                    Switch(
+                        checked = useBackendServer,
+                        onCheckedChange = { useBackendServer = it }
+                    )
+                }
+                if (useBackendServer) {
+                    OutlinedTextField(
+                        value = serverUrl,
+                        onValueChange = { serverUrl = it },
+                        label = { Text("Backend Server URL") },
+                        placeholder = { Text("https://worldlink.yourdomain.com") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("server_url_input")
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { serverUrl = "http://10.0.2.2:8080" },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Emulator", style = MaterialTheme.typography.labelSmall)
+                        }
+                        OutlinedButton(
+                            onClick = { serverUrl = "http://192.168.1.100:8080" },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("LAN Preset", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
                 OutlinedTextField(
                     value = stunUrl,
                     onValueChange = { stunUrl = it },
-                    label = { Text("STUN Server") },
+                    label = { Text("Free Public STUN Server") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -236,10 +254,10 @@ fun ServerConfigDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSaveAndTest(serverUrl, stunUrl, turnUrl, turnUser, turnPass) },
+                onClick = { onSaveAndTest(serverUrl, stunUrl, turnUrl, turnUser, turnPass, useBackendServer) },
                 modifier = Modifier.testTag("save_server_config_button")
             ) {
-                Text("Save & Test")
+                Text(if (useBackendServer) "Save & Test" else "Save In-App")
             }
         },
         dismissButton = {
@@ -273,23 +291,13 @@ fun hasPermission(context: Context, permission: String): Boolean {
 fun requiredCallPermissions(includeCamera: Boolean): Array<String> {
     val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
     if (includeCamera) list.add(Manifest.permission.CAMERA)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        list.add(Manifest.permission.BLUETOOTH_CONNECT)
-    }
     return list.toTypedArray()
 }
 
 fun requiredNearbyPermissions(): Array<String> {
-    val list = mutableListOf<String>()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
     } else {
-        list.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        list.add(Manifest.permission.BLUETOOTH_SCAN)
-        list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-        list.add(Manifest.permission.BLUETOOTH_CONNECT)
-    }
-    return list.toTypedArray()
 }

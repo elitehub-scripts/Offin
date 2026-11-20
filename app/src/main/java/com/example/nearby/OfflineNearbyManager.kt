@@ -1,16 +1,6 @@
 package com.example.nearby
 
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothManager
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,7 +11,6 @@ import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
-import android.os.ParcelUuid
 import android.util.Log
 import com.example.data.local.NearbyMessageEntity
 import com.example.data.local.WorldLinkDao
@@ -52,8 +41,7 @@ enum class NearbyRangeStatus {
 
 enum class NearbyTransport {
     LAN_NSD,
-    WIFI_DIRECT,
-    BLE_BEACON
+    WIFI_DIRECT
 }
 
 data class NearbyPeer(
@@ -63,21 +51,22 @@ data class NearbyPeer(
     val hostAddress: String? = null,
     val port: Int = 0,
     val deviceAddress: String? = null,
-    val rssiDbm: Int? = null,
     val rangeStatus: NearbyRangeStatus = NearbyRangeStatus.IN_RANGE,
     val lastSeenMs: Long = System.currentTimeMillis(),
     val isConnected: Boolean = false
 )
 
+/**
+ * Pure Wi-Fi Direct & Local Wi-Fi (NSD) offline communication manager.
+ * Uses zero Bluetooth and zero internet.
+ */
 class OfflineNearbyManager(
     private val context: Context,
     private val dao: WorldLinkDao
 ) {
     companion object {
         private const val SERVICE_TYPE = "_worldlink._tcp."
-        private val BLE_SERVICE_UUID: ParcelUuid =
-            ParcelUuid.fromString("0000FE9A-0000-1000-8000-00805F9B34FB")
-        private const val PEER_STALE_MS = 18_000L
+        private const val PEER_STALE_MS = 25_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -88,17 +77,14 @@ class OfflineNearbyManager(
     private val _peers = MutableStateFlow<List<NearbyPeer>>(emptyList())
     val peers: StateFlow<List<NearbyPeer>> = _peers.asStateFlow()
 
-    private val _statusBanner = MutableStateFlow("Offline Nearby Mode ready (no internet required)")
+    private val _statusBanner =
+        MutableStateFlow("Offline Wi-Fi Nearby ready (no Bluetooth, no internet needed)")
     val statusBanner: StateFlow<String> = _statusBanner.asStateFlow()
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     private var wifiP2pChannel: WifiP2pManager.Channel? = null
     private var wifiP2pReceiver: BroadcastReceiver? = null
-
-    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
-    private var bleAdvertiser: BluetoothLeAdvertiser? = null
-    private var bleScanner: BluetoothLeScanner? = null
 
     private var serverSocket: ServerSocket? = null
     private var listeningPort: Int = 0
@@ -107,22 +93,17 @@ class OfflineNearbyManager(
 
     private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
     private var nsdDiscoveryListener: NsdManager.DiscoveryListener? = null
-    private var bleAdvertiseCallback: AdvertiseCallback? = null
-    private var bleScanCallback: ScanCallback? = null
 
-    fun startDiscovery(username: String, hasWifiPerm: Boolean, hasBlePerm: Boolean) {
+    fun startDiscovery(username: String, hasWifiPerm: Boolean) {
         myUsername = username.ifBlank { "worldlink_user" }
         if (_isScanning.value) return
         _isScanning.value = true
-        _statusBanner.value = "Scanning local Wi-Fi, Wi-Fi Direct, and BLE range..."
+        _statusBanner.value = "Scanning local Wi-Fi & Wi-Fi Direct peers (Bluetooth off)..."
 
         startTcpSocketServer()
         startNsdAdvertisingAndDiscovery()
         if (hasWifiPerm) {
             startWifiDirectDiscovery()
-        }
-        if (hasBlePerm) {
-            startBleAdvertisingAndScanning()
         }
         startStaleMonitor()
     }
@@ -132,13 +113,12 @@ class OfflineNearbyManager(
         staleCheckJob?.cancel()
         stopNsd()
         stopWifiDirect()
-        stopBle()
         try {
             serverSocket?.close()
         } catch (_: Exception) {
         }
         serverSocket = null
-        _statusBanner.value = "Nearby discovery paused"
+        _statusBanner.value = "Nearby Wi-Fi discovery paused"
     }
 
     private fun startTcpSocketServer() {
@@ -205,7 +185,7 @@ class OfflineNearbyManager(
             val host = peer.hostAddress
             val port = peer.port
             if (host.isNullOrBlank() || port <= 0) {
-                onError("Connect over Wi-Fi Direct or same local Wi-Fi before messaging @${peer.username}.")
+                onError("Connect via Wi-Fi Direct or same Wi-Fi/Hotspot before messaging @${peer.username}.")
                 return@launch
             }
             try {
@@ -233,7 +213,7 @@ class OfflineNearbyManager(
                 )
             } catch (_: Exception) {
                 markPeerOutOfRange(peer.key)
-                onError("@${peer.username} is out of local wireless range or disconnected.")
+                onError("@${peer.username} is out of local Wi-Fi range or disconnected.")
             }
         }
     }
@@ -244,17 +224,17 @@ class OfflineNearbyManager(
         val channel = wifiP2pChannel
         val addr = peer.deviceAddress
         if (manager == null || channel == null || addr.isNullOrBlank()) {
-            onResult("Direct socket ready for local Wi-Fi peer @${peer.username}")
+            onResult("Direct local Wi-Fi socket ready for @${peer.username}")
             return
         }
         val config = WifiP2pConfig().apply { deviceAddress = addr }
         manager.connect(channel, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                onResult("Wi-Fi Direct handshake initiated with @${peer.username}")
+                onResult("Wi-Fi Direct link initiated with @${peer.username}")
             }
 
             override fun onFailure(reason: Int) {
-                onResult("Wi-Fi Direct connection failed (code $reason). Ensure both devices are within range.")
+                onResult("Wi-Fi Direct connection failed (code $reason). Ensure both devices are within local Wi-Fi range.")
             }
         })
     }
@@ -403,80 +383,11 @@ class OfflineNearbyManager(
         wifiP2pChannel = null
     }
 
-    @SuppressLint("MissingPermission")
-    private fun startBleAdvertisingAndScanning() {
-        val adapter = bluetoothManager?.adapter ?: return
-        if (!adapter.isEnabled) return
-
-        bleAdvertiser = adapter.bluetoothLeAdvertiser
-        bleScanner = adapter.bluetoothLeScanner
-
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(false)
-            .build()
-
-        val shortTag = myUsername.take(16).toByteArray(Charsets.UTF_8)
-        val data = AdvertiseData.Builder()
-            .addServiceUuid(BLE_SERVICE_UUID)
-            .addServiceData(BLE_SERVICE_UUID, shortTag)
-            .build()
-
-        bleAdvertiseCallback = object : AdvertiseCallback() {}
-        try {
-            bleAdvertiser?.startAdvertising(settings, data, bleAdvertiseCallback)
-        } catch (_: Exception) {
-        }
-
-        val scanFilter = ScanFilter.Builder().setServiceUuid(BLE_SERVICE_UUID).build()
-        val scanSettings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
-            .build()
-
-        bleScanCallback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val bytes = result.scanRecord?.getServiceData(BLE_SERVICE_UUID) ?: return
-                val peerName = bytes.toString(Charsets.UTF_8).trim()
-                if (peerName.isBlank() || peerName.equals(myUsername, ignoreCase = true)) return
-                val range = when {
-                    result.rssi >= -72 -> NearbyRangeStatus.IN_RANGE
-                    result.rssi >= -88 -> NearbyRangeStatus.WEAK_SIGNAL
-                    else -> NearbyRangeStatus.OUT_OF_RANGE
-                }
-                upsertPeer(
-                    NearbyPeer(
-                        key = "user:$peerName",
-                        username = peerName,
-                        transport = NearbyTransport.BLE_BEACON,
-                        rssiDbm = result.rssi,
-                        rangeStatus = range
-                    )
-                )
-            }
-        }
-        try {
-            bleScanner?.startScan(listOf(scanFilter), scanSettings, bleScanCallback)
-        } catch (_: Exception) {
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopBle() {
-        try {
-            bleAdvertiseCallback?.let { bleAdvertiser?.stopAdvertising(it) }
-            bleScanCallback?.let { bleScanner?.stopScan(it) }
-        } catch (_: Exception) {
-        }
-        bleAdvertiseCallback = null
-        bleScanCallback = null
-    }
-
     private fun startStaleMonitor() {
         staleCheckJob?.cancel()
         staleCheckJob = scope.launch {
             while (isActive) {
-                delay(5000)
+                delay(6000)
                 val now = System.currentTimeMillis()
                 _peers.value = _peers.value.map { peer ->
                     if (now - peer.lastSeenMs > PEER_STALE_MS) {
@@ -499,7 +410,6 @@ class OfflineNearbyManager(
                 hostAddress = incoming.hostAddress ?: prev.hostAddress,
                 port = if (incoming.port > 0) incoming.port else prev.port,
                 deviceAddress = incoming.deviceAddress ?: prev.deviceAddress,
-                rssiDbm = incoming.rssiDbm ?: prev.rssiDbm,
                 rangeStatus = incoming.rangeStatus,
                 lastSeenMs = System.currentTimeMillis(),
                 isConnected = incoming.isConnected || prev.isConnected

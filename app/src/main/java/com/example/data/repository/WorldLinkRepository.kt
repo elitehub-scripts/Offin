@@ -25,19 +25,23 @@ import com.example.data.remote.SignalingEvent
 import com.example.data.remote.UpdateProfileRequest
 import com.example.data.remote.UserDto
 import com.example.data.remote.UsernameCheckResponse
+import com.example.rtc.WebRtcEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.security.SecureRandom
 import java.time.Instant
 import java.util.UUID
+import kotlin.math.abs
 
 class WorldLinkRepository(
     private val dao: WorldLinkDao,
     val prefs: PreferencesStore,
-    val signaling: SignalingClient
+    val signaling: SignalingClient,
+    private val webRtcEngine: WebRtcEngine? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -47,6 +51,8 @@ class WorldLinkRepository(
     val contacts: Flow<List<ContactEntity>> = dao.observeContacts()
     val calls: Flow<List<CallRecordEntity>> = dao.observeCalls()
     val blockedUsers: Flow<List<BlockedUserEntity>> = dao.observeBlockedUsers()
+
+    private val avatarPalette = listOf("#00E5FF", "#10B981", "#38BDF8", "#A78BFA", "#F59E0B")
 
     init {
         scope.launch {
@@ -70,6 +76,19 @@ class WorldLinkRepository(
     fun observeMessages(peerId: String): Flow<List<MessageEntity>> = dao.observeMessages(peerId)
 
     fun observeNearbyMessages(peerKey: String) = dao.observeNearbyMessages(peerKey)
+
+    private fun pickAvatarColor(username: String): String {
+        val idx = abs(username.lowercase().hashCode()) % avatarPalette.size
+        return avatarPalette[idx]
+    }
+
+    private fun generateLocalRecoveryKey(): String {
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        val rng = SecureRandom()
+        return (1..6).joinToString("-") {
+            (1..4).map { alphabet[rng.nextInt(alphabet.length)] }.joinToString("")
+        }
+    }
 
     private suspend fun handleIncomingMessage(sender: UserDto, msg: MessageDto) {
         val myId = prefs.userSession.first().userId
@@ -108,8 +127,10 @@ class WorldLinkRepository(
     suspend fun connectRealtimeIfSignedIn() {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        if (session.isSignedIn) {
+        if (session.isSignedIn && appPrefs.useBackendServer) {
             signaling.connect(appPrefs.serverBaseUrl, session.sessionToken)
+        } else {
+            signaling.disconnect()
         }
     }
 
@@ -123,24 +144,48 @@ class WorldLinkRepository(
     }
 
     suspend fun checkUsernameAvailability(username: String): Result<UsernameCheckResponse> = runCatching {
+        val clean = username.trim().removePrefix("@")
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl).checkUsername(username.trim().removePrefix("@"))
+        if (!appPrefs.useBackendServer) {
+            return@runCatching UsernameCheckResponse(
+                username = clean,
+                available = true,
+                reason = "@$clean will be saved locally inside this app (zero server)"
+            )
+        }
+        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl).checkUsername(clean)
         val body = resp.body()
         if (resp.isSuccessful && body != null) {
             body
         } else {
             val reason = NetworkModule.parseError(resp, "Could not verify username")
-            UsernameCheckResponse(username = username, available = false, reason = reason)
+            UsernameCheckResponse(username = clean, available = false, reason = reason)
         }
     }
 
     suspend fun registerUsername(username: String, displayName: String): Result<UserSession> = runCatching {
         val appPrefs = prefs.appPreferences.first()
         val clean = username.trim().removePrefix("@")
+        val resolvedDisplay = displayName.trim().ifBlank { clean }
+
+        if (!appPrefs.useBackendServer) {
+            val localSession = UserSession(
+                userId = "local_${UUID.randomUUID()}",
+                username = clean,
+                displayName = resolvedDisplay,
+                bio = "Saved locally in WorldLink",
+                avatarColor = pickAvatarColor(clean),
+                sessionToken = "in_app_${UUID.randomUUID()}",
+                recoveryKey = generateLocalRecoveryKey()
+            )
+            prefs.saveSession(localSession)
+            return@runCatching localSession
+        }
+
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl).register(
             RegisterRequest(
                 username = clean,
-                displayName = displayName.trim().ifBlank { clean },
+                displayName = resolvedDisplay,
                 deviceLabel = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
             )
         )
@@ -166,6 +211,20 @@ class WorldLinkRepository(
     suspend fun recoverIdentity(username: String, recoveryKey: String): Result<UserSession> = runCatching {
         val appPrefs = prefs.appPreferences.first()
         val clean = username.trim().removePrefix("@")
+        if (!appPrefs.useBackendServer) {
+            val restored = UserSession(
+                userId = "local_${clean.lowercase()}",
+                username = clean,
+                displayName = clean,
+                bio = "Restored locally in WorldLink",
+                avatarColor = pickAvatarColor(clean),
+                sessionToken = "in_app_${UUID.randomUUID()}",
+                recoveryKey = recoveryKey.trim().ifBlank { generateLocalRecoveryKey() }
+            )
+            prefs.saveSession(restored)
+            return@runCatching restored
+        }
+
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl).recover(
             RecoverRequest(
                 username = clean,
@@ -194,8 +253,9 @@ class WorldLinkRepository(
 
     suspend fun refreshAllFromBackend(): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
-        if (!session.isSignedIn) return@runCatching
         val appPrefs = prefs.appPreferences.first()
+        if (!session.isSignedIn || !appPrefs.useBackendServer) return@runCatching
+
         val api = NetworkModule.apiFor(appPrefs.serverBaseUrl)
         val auth = "Bearer ${session.sessionToken}"
 
@@ -276,20 +336,57 @@ class WorldLinkRepository(
     suspend fun searchUsers(query: String): Result<List<UserDto>> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
+        val cleanQuery = query.trim().removePrefix("@")
+        if (!appPrefs.useBackendServer) {
+            return@runCatching dao.observeContacts().first()
+                .filter {
+                    it.username.contains(cleanQuery, ignoreCase = true) ||
+                        it.displayName.contains(cleanQuery, ignoreCase = true)
+                }
+                .map {
+                    UserDto(
+                        id = it.userId,
+                        username = it.username,
+                        displayName = it.displayName,
+                        bio = it.bio,
+                        avatarColor = it.avatarColor,
+                        isOnline = it.isOnline,
+                        lastSeenAt = it.lastSeenAt
+                    )
+                }
+        }
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .searchUsers("Bearer ${session.sessionToken}", query.trim())
+            .searchUsers("Bearer ${session.sessionToken}", cleanQuery)
         if (!resp.isSuccessful) {
             error(NetworkModule.parseError(resp, "Search failed (${resp.code()})"))
         }
         resp.body()?.users ?: emptyList()
     }
 
+    suspend fun addLocalContact(username: String, displayName: String): Result<ContactEntity> = runCatching {
+        val clean = username.trim().removePrefix("@").filter { it.isLetterOrDigit() || it == '_' }.take(24)
+        require(clean.length >= 3) { "Enter a valid 3–24 character @username." }
+        val contact = ContactEntity(
+            userId = "p2p_${clean.lowercase()}",
+            username = clean,
+            displayName = displayName.trim().ifBlank { clean },
+            bio = "Saved in-app • Direct P2P / Local",
+            avatarColor = pickAvatarColor(clean),
+            isOnline = true,
+            lastSeenAt = Instant.now().toString()
+        )
+        dao.upsertContact(contact)
+        contact
+    }
+
     suspend fun addContact(peer: UserDto): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .addContact("Bearer ${session.sessionToken}", AddContactRequest(peer.id))
-        if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Could not add contact"))
+        if (appPrefs.useBackendServer) {
+            val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
+                .addContact("Bearer ${session.sessionToken}", AddContactRequest(peer.id))
+            if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Could not add contact"))
+        }
         dao.upsertContact(
             ContactEntity(
                 userId = peer.id,
@@ -306,34 +403,54 @@ class WorldLinkRepository(
     suspend fun removeContact(userId: String): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .removeContact("Bearer ${session.sessionToken}", userId)
-        if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Could not remove contact"))
+        if (appPrefs.useBackendServer) {
+            val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
+                .removeContact("Bearer ${session.sessionToken}", userId)
+            if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Could not remove contact"))
+        }
         dao.deleteContact(userId)
     }
 
     suspend fun blockUser(peer: UserDto, reason: String = "Blocked by user"): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .blockUser("Bearer ${session.sessionToken}", BlockRequest(peer.id, reason))
-        if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Block failed"))
+        if (appPrefs.useBackendServer) {
+            val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
+                .blockUser("Bearer ${session.sessionToken}", BlockRequest(peer.id, reason))
+            if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Block failed"))
+        }
         dao.deleteContact(peer.id)
-        refreshAllFromBackend()
+        dao.upsertBlockedUsers(
+            listOf(
+                BlockedUserEntity(
+                    userId = peer.id,
+                    username = peer.username,
+                    displayName = peer.displayName,
+                    reason = reason,
+                    blockedAt = Instant.now().toString()
+                )
+            )
+        )
+        if (appPrefs.useBackendServer) {
+            refreshAllFromBackend()
+        }
     }
 
     suspend fun unblockUser(userId: String): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .unblockUser("Bearer ${session.sessionToken}", userId)
-        if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Unblock failed"))
+        if (appPrefs.useBackendServer) {
+            val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
+                .unblockUser("Bearer ${session.sessionToken}", userId)
+            if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Unblock failed"))
+        }
         dao.deleteBlockedUser(userId)
     }
 
     suspend fun reportUser(userId: String, category: String, details: String): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
+        if (!appPrefs.useBackendServer) return@runCatching
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
             .reportUser("Bearer ${session.sessionToken}", ReportRequest(userId, category, details))
         if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Report submission failed"))
@@ -343,6 +460,8 @@ class WorldLinkRepository(
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
         dao.clearUnread(peer.id)
+        if (!appPrefs.useBackendServer) return@runCatching
+
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
             .getMessages("Bearer ${session.sessionToken}", peer.id)
         if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Unable to sync messages"))
@@ -377,6 +496,40 @@ class WorldLinkRepository(
         val appPrefs = prefs.appPreferences.first()
         val clientId = UUID.randomUUID().toString()
         val now = Instant.now().toString()
+
+        if (!appPrefs.useBackendServer) {
+            val sentP2p = webRtcEngine?.sendDataChannelText(body) == true
+            val finalStatus = if (sentP2p) "DELIVERED" else "SENT"
+            dao.upsertMessage(
+                MessageEntity(
+                    id = clientId,
+                    conversationId = "local_${peer.id}",
+                    peerId = peer.id,
+                    senderId = session.userId,
+                    recipientId = peer.id,
+                    replyToMessageId = replyToMessageId,
+                    body = body,
+                    status = finalStatus,
+                    createdAt = now
+                )
+            )
+            dao.upsertConversation(
+                ConversationEntity(
+                    peerId = peer.id,
+                    peerUsername = peer.username,
+                    peerDisplayName = peer.displayName,
+                    peerAvatarColor = peer.avatarColor,
+                    peerIsOnline = peer.isOnline,
+                    peerLastSeenAt = now,
+                    lastMessageBody = body,
+                    lastMessageAt = now,
+                    lastMessageSenderId = session.userId,
+                    lastMessageStatus = finalStatus,
+                    unreadCount = 0
+                )
+            )
+            return@runCatching
+        }
 
         dao.upsertMessage(
             MessageEntity(
@@ -441,18 +594,22 @@ class WorldLinkRepository(
     suspend fun deleteMessage(messageId: String): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .deleteMessage("Bearer ${session.sessionToken}", messageId)
-        if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Delete failed"))
+        if (appPrefs.useBackendServer) {
+            val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
+                .deleteMessage("Bearer ${session.sessionToken}", messageId)
+            if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Delete failed"))
+        }
         dao.markMessageDeleted(messageId)
     }
 
     suspend fun clearConversation(peerId: String): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
-            .clearConversation("Bearer ${session.sessionToken}", peerId)
-        if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Clear failed"))
+        if (appPrefs.useBackendServer) {
+            val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
+                .clearConversation("Bearer ${session.sessionToken}", peerId)
+            if (!resp.isSuccessful) error(NetworkModule.parseError(resp, "Clear failed"))
+        }
         dao.clearMessagesForPeer(peerId)
         dao.deleteConversation(peerId)
     }
@@ -464,6 +621,14 @@ class WorldLinkRepository(
     suspend fun updateProfile(displayName: String, bio: String): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
+        if (!appPrefs.useBackendServer) {
+            prefs.updateProfileIdentity(
+                session.username,
+                displayName.trim().ifBlank { session.username },
+                bio.trim()
+            )
+            return@runCatching
+        }
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
             .updateProfile("Bearer ${session.sessionToken}", UpdateProfileRequest(displayName, bio))
         val updated = resp.body()?.user
@@ -477,6 +642,10 @@ class WorldLinkRepository(
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
         val clean = newUsername.trim().removePrefix("@")
+        if (!appPrefs.useBackendServer) {
+            prefs.updateProfileIdentity(clean, session.displayName, session.bio)
+            return@runCatching
+        }
         val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
             .changeUsername("Bearer ${session.sessionToken}", ChangeUsernameRequest(clean))
         val updated = resp.body()?.user
@@ -489,11 +658,13 @@ class WorldLinkRepository(
     suspend fun deleteAccount(): Result<Unit> = runCatching {
         val session = prefs.userSession.first()
         val appPrefs = prefs.appPreferences.first()
-        if (session.isSignedIn) {
+        if (session.isSignedIn && appPrefs.useBackendServer) {
             NetworkModule.apiFor(appPrefs.serverBaseUrl).deleteAccount("Bearer ${session.sessionToken}")
         }
         signaling.disconnect()
         clearLocalCache()
+        dao.clearContacts()
+        dao.clearBlockedUsers()
         prefs.clearSession()
     }
 
@@ -504,19 +675,21 @@ class WorldLinkRepository(
         dao.clearAllNearbyMessages()
     }
 
+    suspend fun setUseBackendServer(enabled: Boolean) {
+        prefs.setUseBackendServer(enabled)
+        connectRealtimeIfSignedIn()
+    }
+
     suspend fun saveServerConfig(
         serverBaseUrl: String,
         stunUrl: String,
         turnUrl: String,
         turnUsername: String,
-        turnCredential: String
+        turnCredential: String,
+        useBackendServer: Boolean? = null
     ) {
-        prefs.saveServerConfig(serverBaseUrl, stunUrl, turnUrl, turnUsername, turnCredential)
-        val session = prefs.userSession.first()
-        if (session.isSignedIn) {
-            signaling.disconnect()
-            signaling.connect(serverBaseUrl, session.sessionToken)
-        }
+        prefs.saveServerConfig(serverBaseUrl, stunUrl, turnUrl, turnUsername, turnCredential, useBackendServer)
+        connectRealtimeIfSignedIn()
     }
 
     suspend fun setTheme(theme: ThemePreference) = prefs.setThemePreference(theme)

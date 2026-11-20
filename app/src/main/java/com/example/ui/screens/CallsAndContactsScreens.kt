@@ -25,9 +25,11 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PresentToAll
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
@@ -200,17 +202,23 @@ fun ContactsTab(
     contacts: List<ContactEntity>,
     searchResults: List<UserDto>,
     isSearching: Boolean,
+    useBackendServer: Boolean = false,
     onSearchQuery: (String) -> Unit,
+    onAddLocalContact: (username: String, displayName: String) -> Unit = { _, _ -> },
     onAddContact: (UserDto) -> Unit,
     onRemoveContact: (String) -> Unit,
     onOpenChat: (UserDto) -> Unit,
     onStartCall: (UserDto, CallKind) -> Unit,
+    onCreateServerlessOffer: (peerUsername: String, CallKind) -> Unit = { _, _ -> },
+    onAcceptServerlessOffer: (String) -> Boolean = { false },
     onBlockUser: (UserDto) -> Unit,
     onReportUser: (UserDto, String, String) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     var selectedProfile by remember { mutableStateOf<UserDto?>(null) }
     var reportTarget by remember { mutableStateOf<UserDto?>(null) }
+    var showAddLocalDialog by remember { mutableStateOf(false) }
+    var showP2pDialog by remember { mutableStateOf(false) }
 
     val contactIds = remember(contacts) { contacts.map { it.userId }.toSet() }
 
@@ -219,6 +227,53 @@ fun ContactsTab(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Direct Cross-Country Serverless P2P & In-App Contacts Card
+        item {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.Public, contentDescription = null, tint = EmeraldSignal)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Direct Cross-Country P2P (Zero Server)", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                text = "Call & chat internationally over Wi-Fi without any backend server by exchanging a one-time WL1 P2P code, or save contacts locally inside the app.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { showP2pDialog = true },
+                            modifier = Modifier.weight(1f).testTag("direct_p2p_link_button")
+                        ) {
+                            Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Direct P2P Link")
+                        }
+                        OutlinedButton(
+                            onClick = { showAddLocalDialog = true },
+                            modifier = Modifier.weight(1f).testTag("add_local_contact_button")
+                        ) {
+                            Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Add In-App")
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             OutlinedTextField(
                 value = query,
@@ -226,7 +281,9 @@ fun ContactsTab(
                     query = it
                     onSearchQuery(it)
                 },
-                label = { Text("Discover Global Users by @username") },
+                label = {
+                    Text(if (useBackendServer) "Discover Global Users by @username" else "Filter Saved In-App Contacts")
+                },
                 placeholder = { Text("Search @Mahid_2026...") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = {
@@ -486,6 +543,128 @@ fun ContactsTab(
             },
             dismissButton = {
                 TextButton(onClick = { reportTarget = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showAddLocalDialog) {
+        var newHandle by remember { mutableStateOf("") }
+        var newDisplay by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddLocalDialog = false },
+            title = { Text("Save Contact In-App") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Saved locally inside your device database — zero backend server required.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = newHandle,
+                        onValueChange = { newHandle = it.replace("@", "").filter { ch -> ch.isLetterOrDigit() || ch == '_' } },
+                        label = { Text("@username") },
+                        placeholder = { Text("Mahid_2026") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("local_contact_username_input")
+                    )
+                    OutlinedTextField(
+                        value = newDisplay,
+                        onValueChange = { newDisplay = it },
+                        label = { Text("Display Name (optional)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onAddLocalContact(newHandle, newDisplay)
+                        showAddLocalDialog = false
+                    },
+                    enabled = newHandle.length >= 3,
+                    modifier = Modifier.testTag("local_contact_save_button")
+                ) {
+                    Text("Save Contact")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddLocalDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showP2pDialog) {
+        var peerHandle by remember { mutableStateOf("") }
+        var offerInput by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showP2pDialog = false },
+            title = { Text("Direct P2P Link (Zero Server)") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Option 1: Create a Voice or Video P2P Offer code over Wi-Fi and send it to a friend in another country.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = peerHandle,
+                        onValueChange = { peerHandle = it.replace("@", "") },
+                        label = { Text("Friend's @username") },
+                        placeholder = { Text("friend_uk") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                showP2pDialog = false
+                                onCreateServerlessOffer(peerHandle, CallKind.AUDIO)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Voice Offer")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                showP2pDialog = false
+                                onCreateServerlessOffer(peerHandle, CallKind.VIDEO)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Video Offer")
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Option 2: Received a WL1 Offer code from a friend? Paste it below to connect:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = offerInput,
+                        onValueChange = { offerInput = it },
+                        label = { Text("Paste WL1 Offer Code") },
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (onAcceptServerlessOffer(offerInput)) {
+                            showP2pDialog = false
+                        }
+                    },
+                    enabled = offerInput.isNotBlank()
+                ) {
+                    Text("Join P2P Call")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showP2pDialog = false }) { Text("Close") }
             }
         )
     }

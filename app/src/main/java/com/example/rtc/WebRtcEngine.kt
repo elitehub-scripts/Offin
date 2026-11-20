@@ -6,6 +6,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.projection.MediaProjection
 import android.os.Build
+import android.util.Base64
 import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -18,11 +19,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
@@ -45,12 +50,12 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
-import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
+import java.nio.ByteBuffer
 
-enum class AudioOutputRoute { EARPIECE, SPEAKER, BLUETOOTH }
+enum class AudioOutputRoute { EARPIECE, SPEAKER }
 
 enum class NetworkQualityLevel { EXCELLENT, GOOD, FAIR, POOR }
 
@@ -68,6 +73,8 @@ interface WebRtcCallbacks {
     fun onPeerIceDisconnected()
     fun onPeerIceConnected()
     fun onScreenShareStoppedBySystem()
+    fun onIceGatheringComplete(fullSdpWithCandidates: String) {}
+    fun onDataChannelMessage(text: String) {}
 }
 
 class WebRtcEngine(private val context: Context) {
@@ -78,6 +85,7 @@ class WebRtcEngine(private val context: Context) {
     val eglBase: EglBase = EglBase.create()
     private var factory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
+    private var dataChannel: DataChannel? = null
 
     private var audioSource: AudioSource? = null
     private var localAudioTrack: AudioTrack? = null
@@ -103,6 +111,9 @@ class WebRtcEngine(private val context: Context) {
 
     private val _availableAudioRoutes = MutableStateFlow(listOf(AudioOutputRoute.EARPIECE, AudioOutputRoute.SPEAKER))
     val availableAudioRoutes: StateFlow<List<AudioOutputRoute>> = _availableAudioRoutes.asStateFlow()
+
+    private val _p2pMessages = MutableSharedFlow<String>(extraBufferCapacity = 32)
+    val p2pMessages: SharedFlow<String> = _p2pMessages.asSharedFlow()
 
     private var statsJob: Job? = null
     private var callbacks: WebRtcCallbacks? = null
@@ -138,6 +149,7 @@ class WebRtcEngine(private val context: Context) {
         iceServerDtos: List<IceServerDto>,
         enableVideo: Boolean,
         lowData: Boolean,
+        createDataChannel: Boolean = false,
         callbacks: WebRtcCallbacks
     ) {
         this.callbacks = callbacks
@@ -145,7 +157,6 @@ class WebRtcEngine(private val context: Context) {
         this.remoteDescriptionSet = false
         pendingRemoteIce.clear()
         ensureFactory()
-        refreshAudioRoutes()
 
         val iceServers = iceServerDtos.flatMap { dto ->
             dto.urls.map { url ->
@@ -169,6 +180,15 @@ class WebRtcEngine(private val context: Context) {
             override fun onIceCandidate(candidate: IceCandidate?) {
                 candidate ?: return
                 callbacks.onLocalIceCandidate(candidate.sdpMid, candidate.sdpMLineIndex, candidate.sdp)
+            }
+
+            override fun onIceGatheringChange(newState: PeerConnection.IceGatheringState?) {
+                if (newState == PeerConnection.IceGatheringState.COMPLETE) {
+                    val sdp = peerConnection?.localDescription?.description
+                    if (!sdp.isNullOrBlank()) {
+                        callbacks.onIceGatheringComplete(sdp)
+                    }
+                }
             }
 
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
@@ -197,17 +217,24 @@ class WebRtcEngine(private val context: Context) {
                 }
             }
 
+            override fun onDataChannel(dc: DataChannel?) {
+                dc ?: return
+                attachDataChannel(dc)
+            }
+
             override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
             override fun onIceConnectionReceivingChange(p0: Boolean) {}
-            override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
             override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
             override fun onAddStream(p0: MediaStream?) {}
             override fun onRemoveStream(p0: MediaStream?) {}
-            override fun onDataChannel(p0: DataChannel?) {}
             override fun onRenegotiationNeeded() {}
         })
 
-        // Local audio
+        if (createDataChannel) {
+            val init = DataChannel.Init().apply { ordered = true }
+            peerConnection?.createDataChannel("worldlink_chat", init)?.let { attachDataChannel(it) }
+        }
+
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
@@ -225,6 +252,29 @@ class WebRtcEngine(private val context: Context) {
 
         setAudioRoute(if (enableVideo) AudioOutputRoute.SPEAKER else AudioOutputRoute.EARPIECE)
         startTelemetryLoop()
+    }
+
+    private fun attachDataChannel(dc: DataChannel) {
+        dataChannel = dc
+        dc.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(p0: Long) {}
+            override fun onStateChange() {}
+            override fun onMessage(buffer: DataChannel.Buffer?) {
+                buffer ?: return
+                val bytes = ByteArray(buffer.data.remaining())
+                buffer.data.get(bytes)
+                val text = bytes.toString(Charsets.UTF_8)
+                _p2pMessages.tryEmit(text)
+                callbacks?.onDataChannelMessage(text)
+            }
+        })
+    }
+
+    fun sendDataChannelText(text: String): Boolean {
+        val dc = dataChannel ?: return false
+        if (dc.state() != DataChannel.State.OPEN) return false
+        val buf = ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8))
+        return dc.send(DataChannel.Buffer(buf, false))
     }
 
     private fun startCameraCapture() {
@@ -437,56 +487,20 @@ class WebRtcEngine(private val context: Context) {
         sender.parameters = params
     }
 
-    fun refreshAudioRoutes() {
-        val routes = mutableListOf(AudioOutputRoute.EARPIECE, AudioOutputRoute.SPEAKER)
-        val hasBluetooth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            audioManager.availableCommunicationDevices.any {
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
-            }
-        } else {
-            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-            }
-        }
-        if (hasBluetooth) routes.add(AudioOutputRoute.BLUETOOTH)
-        _availableAudioRoutes.value = routes
-    }
-
     @Suppress("DEPRECATION")
     fun setAudioRoute(route: AudioOutputRoute) {
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val targetType = when (route) {
                 AudioOutputRoute.SPEAKER -> AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
-                AudioOutputRoute.BLUETOOTH -> AudioDeviceInfo.TYPE_BLUETOOTH_SCO
                 AudioOutputRoute.EARPIECE -> AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
             }
             val device = audioManager.availableCommunicationDevices.firstOrNull { it.type == targetType }
-                ?: audioManager.availableCommunicationDevices.firstOrNull {
-                    route == AudioOutputRoute.BLUETOOTH && it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
-                }
             if (device != null) {
                 audioManager.setCommunicationDevice(device)
             }
         } else {
-            when (route) {
-                AudioOutputRoute.SPEAKER -> {
-                    audioManager.stopBluetoothSco()
-                    audioManager.isBluetoothScoOn = false
-                    audioManager.isSpeakerphoneOn = true
-                }
-                AudioOutputRoute.BLUETOOTH -> {
-                    audioManager.isSpeakerphoneOn = false
-                    audioManager.startBluetoothSco()
-                    audioManager.isBluetoothScoOn = true
-                }
-                AudioOutputRoute.EARPIECE -> {
-                    audioManager.stopBluetoothSco()
-                    audioManager.isBluetoothScoOn = false
-                    audioManager.isSpeakerphoneOn = false
-                }
-            }
+            audioManager.isSpeakerphoneOn = route == AudioOutputRoute.SPEAKER
         }
     }
 
@@ -539,6 +553,9 @@ class WebRtcEngine(private val context: Context) {
         cameraTextureHelper?.dispose()
         cameraTextureHelper = null
 
+        dataChannel?.close()
+        dataChannel = null
+
         localAudioTrack?.dispose()
         localAudioTrack = null
         audioSource?.dispose()
@@ -560,6 +577,27 @@ class WebRtcEngine(private val context: Context) {
             audioManager.isSpeakerphoneOn = false
         }
         audioManager.mode = AudioManager.MODE_NORMAL
+    }
+
+    companion object {
+        fun encodeSignalBundle(username: String, kind: String, sdp: String): String {
+            val obj = JSONObject().apply {
+                put("u", username)
+                put("k", kind)
+                put("s", sdp)
+            }
+            return "WL1:" + Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        }
+
+        fun decodeSignalBundle(raw: String): Triple<String, String, String>? {
+            return try {
+                val payload = raw.trim().removePrefix("WL1:")
+                val json = JSONObject(String(Base64.decode(payload, Base64.DEFAULT), Charsets.UTF_8))
+                Triple(json.getString("u"), json.getString("k"), json.getString("s"))
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 
     private open class SdpObserverAdapter : SdpObserver {

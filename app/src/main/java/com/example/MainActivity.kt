@@ -127,6 +127,7 @@ fun WorldLinkRoot(
     val calls by vm.calls.collectAsStateWithLifecycle()
     val blockedUsers by vm.blockedUsers.collectAsStateWithLifecycle()
     val activeCall by vm.activeCall.collectAsStateWithLifecycle()
+    val serverlessSignalCode by vm.serverlessSignalCode.collectAsStateWithLifecycle()
     val telemetry by vm.rtcTelemetry.collectAsStateWithLifecycle()
     val localVideoTrack by vm.webRtcEngine.localVideoTrack.collectAsStateWithLifecycle()
     val remoteVideoTrack by vm.webRtcEngine.remoteVideoTrack.collectAsStateWithLifecycle()
@@ -349,6 +350,7 @@ fun WorldLinkRoot(
                                     recentCalls = calls,
                                     signalingState = signalingState,
                                     hasInternet = connectivity.hasInternet,
+                                    useBackendServer = appPreferences.useBackendServer,
                                     onOpenChat = vm::openChat,
                                     onStartCall = initiateCall,
                                     onOpenContactsSearch = { activeTab = WorldLinkTab.CONTACTS },
@@ -364,11 +366,15 @@ fun WorldLinkRoot(
                                     contacts = contacts,
                                     searchResults = searchResults,
                                     isSearching = isSearching,
+                                    useBackendServer = appPreferences.useBackendServer,
                                     onSearchQuery = vm::searchGlobalUsers,
+                                    onAddLocalContact = vm::addLocalContact,
                                     onAddContact = vm::addContact,
                                     onRemoveContact = vm::removeContact,
                                     onOpenChat = vm::openChat,
                                     onStartCall = initiateCall,
+                                    onCreateServerlessOffer = vm::createServerlessP2pOffer,
+                                    onAcceptServerlessOffer = vm::acceptServerlessP2pOffer,
                                     onBlockUser = vm::blockUser,
                                     onReportUser = vm::reportUser
                                 )
@@ -409,6 +415,7 @@ fun WorldLinkRoot(
                                     onSetShowOnlineStatus = vm::setShowOnlineStatus,
                                     onSetLowData = vm::setLowDataMode,
                                     onUnblockUser = vm::unblockUser,
+                                    onSetUseBackendServer = vm::setUseBackendServer,
                                     onSaveServerConfig = vm::testAndSaveServerConfig,
                                     onClearCache = vm::clearLocalCache,
                                     onDeleteAccount = vm::deleteAccount,
@@ -433,6 +440,8 @@ fun WorldLinkRoot(
                 localVideoTrack = localVideoTrack,
                 remoteVideoTrack = remoteVideoTrack,
                 eglBase = vm.webRtcEngine.eglBase,
+                serverlessSignalCode = serverlessSignalCode,
+                onCompleteServerlessAnswer = vm::completeServerlessP2pAnswer,
                 onAccept = { vm.callManager.acceptIncomingCall() },
                 onDecline = { vm.callManager.declineIncomingCall() },
                 onEndCall = { vm.callManager.endCall() },

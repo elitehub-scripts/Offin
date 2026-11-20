@@ -27,6 +27,7 @@ data class UserSession(
 }
 
 data class AppPreferences(
+    val useBackendServer: Boolean = false,
     val serverBaseUrl: String = DEFAULT_SERVER_URL,
     val stunUrl: String = DEFAULT_STUN_URL,
     val turnUrl: String = "",
@@ -40,7 +41,7 @@ data class AppPreferences(
     val screenShareHighFps: Boolean = true
 ) {
     companion object {
-        // Standard Android emulator host alias; users can switch to any HTTPS/WSS or LAN URL in onboarding or settings
+        // Optional self-hosted endpoint; WorldLink works locally in-app + P2P without any server
         const val DEFAULT_SERVER_URL = "http://10.0.2.2:8080"
         const val DEFAULT_STUN_URL = "stun:stun.l.google.com:19302"
     }
@@ -57,6 +58,7 @@ class PreferencesStore(private val context: Context) {
         val SESSION_TOKEN = stringPreferencesKey("session_token")
         val RECOVERY_KEY = stringPreferencesKey("recovery_key")
 
+        val USE_BACKEND_SERVER = booleanPreferencesKey("use_backend_server")
         val SERVER_BASE_URL = stringPreferencesKey("server_base_url")
         val STUN_URL = stringPreferencesKey("stun_url")
         val TURN_URL = stringPreferencesKey("turn_url")
@@ -87,6 +89,7 @@ class PreferencesStore(private val context: Context) {
         val themeStr = prefs[Keys.THEME_PREF] ?: ThemePreference.DARK.name
         val theme = ThemePreference.entries.firstOrNull { it.name == themeStr } ?: ThemePreference.DARK
         AppPreferences(
+            useBackendServer = prefs[Keys.USE_BACKEND_SERVER] ?: false,
             serverBaseUrl = prefs[Keys.SERVER_BASE_URL]?.ifBlank { AppPreferences.DEFAULT_SERVER_URL }
                 ?: AppPreferences.DEFAULT_SERVER_URL,
             stunUrl = prefs[Keys.STUN_URL]?.ifBlank { AppPreferences.DEFAULT_STUN_URL }
@@ -137,14 +140,22 @@ class PreferencesStore(private val context: Context) {
         }
     }
 
+    suspend fun setUseBackendServer(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.USE_BACKEND_SERVER] = enabled }
+    }
+
     suspend fun saveServerConfig(
         serverBaseUrl: String,
         stunUrl: String,
         turnUrl: String,
         turnUsername: String,
-        turnCredential: String
+        turnCredential: String,
+        useBackendServer: Boolean? = null
     ) {
         context.dataStore.edit { prefs ->
+            if (useBackendServer != null) {
+                prefs[Keys.USE_BACKEND_SERVER] = useBackendServer
+            }
             prefs[Keys.SERVER_BASE_URL] = serverBaseUrl.trim().trimEnd('/')
             prefs[Keys.STUN_URL] = stunUrl.trim().ifBlank { AppPreferences.DEFAULT_STUN_URL }
             prefs[Keys.TURN_URL] = turnUrl.trim()

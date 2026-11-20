@@ -17,10 +17,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BluetoothAudio
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Hearing
@@ -28,25 +28,37 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PresentToAll
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.StopScreenShare
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.Button
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.rtc.ActiveCallState
 import com.example.rtc.AudioOutputRoute
@@ -68,6 +80,8 @@ fun CallOverlayScreen(
     localVideoTrack: VideoTrack?,
     remoteVideoTrack: VideoTrack?,
     eglBase: EglBase,
+    serverlessSignalCode: String? = null,
+    onCompleteServerlessAnswer: (String) -> Boolean = { false },
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     onEndCall: () -> Unit,
@@ -81,6 +95,11 @@ fun CallOverlayScreen(
     onEnterPip: () -> Unit
 ) {
     if (callState.phase == CallPhase.IDLE) return
+
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var answerInput by remember(callState.callId) { mutableStateOf("") }
+    var codeCopiedNotice by remember(callState.callId) { mutableStateOf<String?>(null) }
 
     Box(
         modifier = Modifier
@@ -283,15 +302,111 @@ fun CallOverlayScreen(
                         .padding(horizontal = 16.dp, vertical = 20.dp)
                         .fillMaxWidth()
                 ) {
-                    Column(
-                        modifier = Modifier.padding(vertical = 14.dp, horizontal = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
+                        Column(
+                            modifier = Modifier.padding(vertical = 14.dp, horizontal = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
+                            if (callState.isServerlessP2p && callState.phase != CallPhase.ACTIVE) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = Color.White.copy(alpha = 0.08f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = if (callState.direction == "OUTGOING") {
+                                                "Direct Cross-Country P2P (Zero Server)"
+                                            } else {
+                                                "Send P2P Answer Back to @${callState.peer.username}"
+                                            },
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = if (serverlessSignalCode == null) {
+                                                "Gathering ICE network route..."
+                                            } else {
+                                                serverlessSignalCode
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color.White.copy(alpha = 0.85f),
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    serverlessSignalCode?.let { code ->
+                                                        clipboard.setText(AnnotatedString(code))
+                                                        codeCopiedNotice = "Copied! Send this code to @${callState.peer.username}."
+                                                    }
+                                                },
+                                                enabled = serverlessSignalCode != null,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Copy Code", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    serverlessSignalCode?.let { code ->
+                                                        val sendIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                            type = "text/plain"
+                                                            putExtra(android.content.Intent.EXTRA_TEXT, code)
+                                                        }
+                                                        context.startActivity(android.content.Intent.createChooser(sendIntent, "Share WorldLink P2P Code"))
+                                                    }
+                                                },
+                                                enabled = serverlessSignalCode != null,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Share", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+                                        if (codeCopiedNotice != null) {
+                                            Text(
+                                                text = codeCopiedNotice.orEmpty(),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = EmeraldSignal
+                                            )
+                                        }
+                                        if (callState.direction == "OUTGOING") {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                OutlinedTextField(
+                                                    value = answerInput,
+                                                    onValueChange = { answerInput = it },
+                                                    placeholder = { Text("Paste friend's WL1 Answer code...") },
+                                                    singleLine = true,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Button(
+                                                    onClick = {
+                                                        val ok = onCompleteServerlessAnswer(answerInput)
+                                                        if (ok) answerInput = ""
+                                                    },
+                                                    enabled = answerInput.isNotBlank()
+                                                ) {
+                                                    Text("Connect")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
                             CallControlPill(
                                 icon = if (callState.isMuted) Icons.Default.MicOff else Icons.Default.Mic,
                                 label = if (callState.isMuted) "Unmute" else "Mute",
@@ -301,7 +416,6 @@ fun CallOverlayScreen(
                             CallControlPill(
                                 icon = when (callState.audioRoute) {
                                     AudioOutputRoute.SPEAKER -> Icons.Default.VolumeUp
-                                    AudioOutputRoute.BLUETOOTH -> Icons.Default.BluetoothAudio
                                     AudioOutputRoute.EARPIECE -> Icons.Default.Hearing
                                 },
                                 label = callState.audioRoute.name.lowercase().replaceFirstChar { it.uppercase() },

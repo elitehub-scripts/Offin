@@ -29,8 +29,8 @@ class AppContainer(app: Application) {
     val prefs = PreferencesStore(app)
     val signaling = SignalingClient()
     val networkMonitor = NetworkStatusMonitor(app)
-    val repository = WorldLinkRepository(dao, prefs, signaling)
     val webRtcEngine = WebRtcEngine(app)
+    val repository = WorldLinkRepository(dao, prefs, signaling, webRtcEngine)
     val callManager = CallManager(app, signaling, prefs, dao, webRtcEngine)
     val nearbyManager = OfflineNearbyManager(app, dao)
 }

@@ -4,14 +4,16 @@ import android.content.Context
 import android.content.Intent
 import com.example.data.local.AppPreferences
 import com.example.data.local.CallRecordEntity
+import com.example.data.local.ConversationEntity
+import com.example.data.local.MessageEntity
 import com.example.data.local.PreferencesStore
 import com.example.data.local.WorldLinkDao
 import com.example.data.remote.IceServerDto
 import com.example.data.remote.NetworkModule
+import com.example.data.remote.SaveCallRequest
 import com.example.data.remote.SignalingClient
 import com.example.data.remote.SignalingEvent
 import com.example.data.remote.UserDto
-import com.example.data.remote.SaveCallRequest
 import com.example.service.NotificationHelper
 import com.example.service.WorldLinkCallService
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +54,7 @@ data class ActiveCallState(
     val isScreenSharing: Boolean = false,
     val isRemoteScreenSharing: Boolean = false,
     val isFullScreen: Boolean = false,
+    val isServerlessP2p: Boolean = false,
     val audioRoute: AudioOutputRoute = AudioOutputRoute.EARPIECE,
     val statusMessage: String = ""
 )
@@ -67,6 +70,9 @@ class CallManager(
 
     private val _callState = MutableStateFlow(ActiveCallState())
     val callState: StateFlow<ActiveCallState> = _callState.asStateFlow()
+
+    private val _serverlessSignalCode = MutableStateFlow<String?>(null)
+    val serverlessSignalCode: StateFlow<String?> = _serverlessSignalCode.asStateFlow()
 
     private var timerJob: Job? = null
 
@@ -117,6 +123,202 @@ class CallManager(
                     }
                     else -> Unit
                 }
+            }
+        }
+    }
+
+    /**
+     * Serverless Cross-Country Direct WebRTC P2P Link (Zero backend server required):
+     * Device A creates a WebRTC Offer + ICE bundle using free public STUN.
+     */
+    fun createServerlessP2pOffer(myUsername: String, peerUsername: String, kind: CallKind) {
+        if (_callState.value.phase != CallPhase.IDLE) return
+        val callId = UUID.randomUUID().toString()
+        val peerId = "p2p_${peerUsername.lowercase()}"
+        val peer = UserDto(
+            id = peerId,
+            username = peerUsername,
+            displayName = peerUsername,
+            isOnline = true
+        )
+        _serverlessSignalCode.value = null
+        _callState.value = ActiveCallState(
+            callId = callId,
+            peer = peer,
+            kind = kind,
+            direction = "OUTGOING",
+            phase = CallPhase.CONNECTING,
+            isCameraEnabled = kind == CallKind.VIDEO,
+            isServerlessP2p = true,
+            audioRoute = if (kind == CallKind.VIDEO) AudioOutputRoute.SPEAKER else AudioOutputRoute.EARPIECE,
+            statusMessage = "Gathering P2P ICE routes..."
+        )
+        scope.launch {
+            val appPrefs = prefs.appPreferences.first()
+            val ice = listOf(IceServerDto(urls = listOf(appPrefs.stunUrl)))
+            rtcEngine.startSession(
+                iceServerDtos = ice,
+                enableVideo = kind == CallKind.VIDEO,
+                lowData = appPrefs.lowDataMode,
+                createDataChannel = true,
+                callbacks = createServerlessCallbacks(callId, myUsername, peer)
+            )
+            WorldLinkCallService.start(
+                context = context,
+                peerUsername = peer.username,
+                isVideo = kind == CallKind.VIDEO,
+                isScreenSharing = false
+            )
+            rtcEngine.createOffer()
+        }
+    }
+
+    /**
+     * Device B pastes Device A's Serverless Offer Code and generates a direct Answer Code.
+     */
+    fun acceptServerlessP2pOffer(myUsername: String, encodedOffer: String): Boolean {
+        val decoded = WebRtcEngine.decodeSignalBundle(encodedOffer) ?: return false
+        val (remoteUsername, kindName, remoteSdp) = decoded
+        val kind = CallKind.entries.firstOrNull { it.name == kindName } ?: CallKind.AUDIO
+        val callId = UUID.randomUUID().toString()
+        val peer = UserDto(
+            id = "p2p_${remoteUsername.lowercase()}",
+            username = remoteUsername,
+            displayName = remoteUsername,
+            isOnline = true
+        )
+        _serverlessSignalCode.value = null
+        _callState.value = ActiveCallState(
+            callId = callId,
+            peer = peer,
+            kind = kind,
+            direction = "INCOMING",
+            phase = CallPhase.CONNECTING,
+            isCameraEnabled = kind == CallKind.VIDEO,
+            isServerlessP2p = true,
+            audioRoute = if (kind == CallKind.VIDEO) AudioOutputRoute.SPEAKER else AudioOutputRoute.EARPIECE,
+            statusMessage = "Generating direct P2P Answer..."
+        )
+        scope.launch {
+            val appPrefs = prefs.appPreferences.first()
+            val ice = listOf(IceServerDto(urls = listOf(appPrefs.stunUrl)))
+            rtcEngine.startSession(
+                iceServerDtos = ice,
+                enableVideo = kind == CallKind.VIDEO,
+                lowData = appPrefs.lowDataMode,
+                createDataChannel = false,
+                callbacks = createServerlessCallbacks(callId, myUsername, peer)
+            )
+            WorldLinkCallService.start(
+                context = context,
+                peerUsername = peer.username,
+                isVideo = kind == CallKind.VIDEO,
+                isScreenSharing = false
+            )
+            rtcEngine.handleRemoteOffer(remoteSdp)
+        }
+        return true
+    }
+
+    /**
+     * Device A pastes Device B's Answer Code to connect directly across countries over Wi-Fi.
+     */
+    fun completeServerlessP2pAnswer(encodedAnswer: String): Boolean {
+        val decoded = WebRtcEngine.decodeSignalBundle(encodedAnswer) ?: return false
+        rtcEngine.handleRemoteAnswer(decoded.third)
+        return true
+    }
+
+    private fun createServerlessCallbacks(
+        callId: String,
+        myUsername: String,
+        peer: UserDto
+    ): WebRtcCallbacks {
+        return object : WebRtcCallbacks {
+            override fun onLocalSdpOffer(sdp: String) {
+                _serverlessSignalCode.value = WebRtcEngine.encodeSignalBundle(
+                    myUsername,
+                    _callState.value.kind.name,
+                    sdp
+                )
+            }
+
+            override fun onLocalSdpAnswer(sdp: String) {
+                _serverlessSignalCode.value = WebRtcEngine.encodeSignalBundle(
+                    myUsername,
+                    _callState.value.kind.name,
+                    sdp
+                )
+            }
+
+            override fun onIceGatheringComplete(fullSdpWithCandidates: String) {
+                _serverlessSignalCode.value = WebRtcEngine.encodeSignalBundle(
+                    myUsername,
+                    _callState.value.kind.name,
+                    fullSdpWithCandidates
+                )
+                _callState.value = _callState.value.copy(
+                    statusMessage = "P2P Code Ready — Share with @${peer.username}"
+                )
+            }
+
+            override fun onLocalIceCandidate(sdpMid: String, sdpMLineIndex: Int, candidate: String) {}
+
+            override fun onPeerIceConnected() {
+                if (_callState.value.callId == callId) {
+                    _callState.value = _callState.value.copy(
+                        phase = CallPhase.ACTIVE,
+                        statusMessage = "Direct P2P Connected"
+                    )
+                    startDurationTimer()
+                }
+            }
+
+            override fun onPeerIceDisconnected() {
+                if (_callState.value.callId == callId && _callState.value.phase == CallPhase.ACTIVE) {
+                    _callState.value = _callState.value.copy(
+                        phase = CallPhase.RECONNECTING,
+                        statusMessage = "Reconnecting P2P..."
+                    )
+                }
+            }
+
+            override fun onDataChannelMessage(text: String) {
+                scope.launch(Dispatchers.IO) {
+                    val myId = prefs.userSession.first().userId
+                    val now = Instant.now().toString()
+                    dao.upsertMessage(
+                        MessageEntity(
+                            id = UUID.randomUUID().toString(),
+                            conversationId = "p2p_${peer.id}",
+                            peerId = peer.id,
+                            senderId = peer.id,
+                            recipientId = myId,
+                            body = text,
+                            status = "READ",
+                            createdAt = now
+                        )
+                    )
+                    dao.upsertConversation(
+                        ConversationEntity(
+                            peerId = peer.id,
+                            peerUsername = peer.username,
+                            peerDisplayName = peer.displayName,
+                            peerAvatarColor = peer.avatarColor,
+                            peerIsOnline = true,
+                            peerLastSeenAt = now,
+                            lastMessageBody = text,
+                            lastMessageAt = now,
+                            lastMessageSenderId = peer.id,
+                            lastMessageStatus = "READ",
+                            unreadCount = 0
+                        )
+                    )
+                }
+            }
+
+            override fun onScreenShareStoppedBySystem() {
+                stopScreenShare()
             }
         }
     }
@@ -279,10 +481,11 @@ class CallManager(
     }
 
     fun cycleAudioRoute() {
-        rtcEngine.refreshAudioRoutes()
-        val routes = rtcEngine.availableAudioRoutes.value
-        val currentIdx = routes.indexOf(_callState.value.audioRoute)
-        val nextRoute = routes[(currentIdx + 1) % routes.size]
+        val nextRoute = if (_callState.value.audioRoute == AudioOutputRoute.SPEAKER) {
+            AudioOutputRoute.EARPIECE
+        } else {
+            AudioOutputRoute.SPEAKER
+        }
         rtcEngine.setAudioRoute(nextRoute)
         _callState.value = _callState.value.copy(audioRoute = nextRoute)
     }
@@ -304,7 +507,9 @@ class CallManager(
             )
             rtcEngine.startScreenShare(permissionIntent, highFps)
             _callState.value = current.copy(isScreenSharing = true)
-            signaling.sendScreenShareState(current.callId, current.peer.id, true)
+            if (!current.isServerlessP2p) {
+                signaling.sendScreenShareState(current.callId, current.peer.id, true)
+            }
         }
     }
 
@@ -320,7 +525,9 @@ class CallManager(
                 isVideo = current.isCameraEnabled,
                 isScreenSharing = false
             )
-            signaling.sendScreenShareState(current.callId, current.peer.id, false)
+            if (!current.isServerlessP2p) {
+                signaling.sendScreenShareState(current.callId, current.peer.id, false)
+            }
         }
     }
 
@@ -329,7 +536,9 @@ class CallManager(
         if (current.phase == CallPhase.IDLE) return
         NotificationHelper.cancelIncomingCallNotification(context)
         val quality = rtcEngine.telemetry.value.quality.name
-        signaling.sendCallEnd(current.callId, current.peer.id, current.durationSeconds, quality)
+        if (!current.isServerlessP2p) {
+            signaling.sendCallEnd(current.callId, current.peer.id, current.durationSeconds, quality)
+        }
         persistCallRecord(current, if (current.durationSeconds > 0) "ENDED" else "MISSED")
         cleanupRtc()
     }
@@ -352,6 +561,7 @@ class CallManager(
     private fun cleanupRtc() {
         timerJob?.cancel()
         timerJob = null
+        _serverlessSignalCode.value = null
         rtcEngine.endSession()
         WorldLinkCallService.stop(context)
         _callState.value = ActiveCallState()
@@ -378,7 +588,7 @@ class CallManager(
             try {
                 val session = prefs.userSession.first()
                 val appPrefs = prefs.appPreferences.first()
-                if (session.isSignedIn) {
+                if (session.isSignedIn && appPrefs.useBackendServer && !state.isServerlessP2p) {
                     NetworkModule.apiFor(appPrefs.serverBaseUrl).saveCall(
                         auth = "Bearer ${session.sessionToken}",
                         body = SaveCallRequest(
@@ -412,7 +622,7 @@ class CallManager(
                 )
             }
         }
-        if (!session.isSignedIn) return fallback
+        if (!session.isSignedIn || !appPrefs.useBackendServer) return fallback
         return try {
             val resp = NetworkModule.apiFor(appPrefs.serverBaseUrl)
                 .getIceServers("Bearer ${session.sessionToken}")

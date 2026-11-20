@@ -79,7 +79,8 @@ fun SettingsTab(
     onSetShowOnlineStatus: (Boolean) -> Unit,
     onSetLowData: (Boolean) -> Unit,
     onUnblockUser: (String) -> Unit,
-    onSaveServerConfig: (String, String, String, String, String) -> Unit,
+    onSetUseBackendServer: (Boolean) -> Unit = {},
+    onSaveServerConfig: (String, String, String, String, String, Boolean) -> Unit,
     onClearCache: () -> Unit,
     onDeleteAccount: () -> Unit,
     onCopyFeedback: (String) -> Unit
@@ -295,10 +296,20 @@ fun SettingsTab(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Default.Dns, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Text("Backend, STUN/TURN & Storage", style = MaterialTheme.typography.titleMedium)
+                        Text("In-App Storage, STUN/TURN & Server", style = MaterialTheme.typography.titleMedium)
                     }
+                    SettingSwitchRow(
+                        title = "Use Optional Backend Server",
+                        subtitle = if (appPreferences.useBackendServer) {
+                            "Syncing with ${appPreferences.serverBaseUrl}"
+                        } else {
+                            "Off: user profile, contacts & chats save in-app only (Zero Server)"
+                        },
+                        checked = appPreferences.useBackendServer,
+                        onCheckedChange = onSetUseBackendServer
+                    )
                     Text(
-                        text = "Endpoint: ${appPreferences.serverBaseUrl}\nSTUN: ${appPreferences.stunUrl}",
+                        text = "STUN: ${appPreferences.stunUrl}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -306,7 +317,7 @@ fun SettingsTab(
                         OutlinedButton(onClick = { showServerDialog = true }, modifier = Modifier.weight(1f)) {
                             Icon(Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Server & ICE")
+                            Text("ICE & Server")
                         }
                         OutlinedButton(onClick = onClearCache, modifier = Modifier.weight(1f)) {
                             Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -321,7 +332,7 @@ fun SettingsTab(
                     ) {
                         Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Delete Account & Associated Data")
+                        Text("Delete In-App Identity & Data")
                     }
                 }
             }
@@ -343,7 +354,7 @@ fun SettingsTab(
                     Column {
                         Text("WorldLink v1.0.0", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "Free, SIM-independent WebRTC & Nearby communication. Zero ads, zero phone/email tracking.",
+                            text = "100% Free, Zero Bluetooth, Zero Ads, In-App User Storage & Wi-Fi P2P / Nearby communication.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -395,7 +406,11 @@ fun SettingsTab(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Your new username is verified atomically against the backend database to preserve global uniqueness.",
+                        text = if (appPreferences.useBackendServer) {
+                            "Your new username is verified against the optional backend database."
+                        } else {
+                            "Your new @username is saved locally inside this app."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -510,8 +525,8 @@ fun SettingsTab(
             currentPrefs = appPreferences,
             statusNote = null,
             onDismiss = { showServerDialog = false },
-            onSaveAndTest = { srv, stun, turn, user, pass ->
-                onSaveServerConfig(srv, stun, turn, user, pass)
+            onSaveAndTest = { srv, stun, turn, user, pass, useSrv ->
+                onSaveServerConfig(srv, stun, turn, user, pass, useSrv)
                 showServerDialog = false
             }
         )

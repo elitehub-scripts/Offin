@@ -96,6 +96,7 @@ class WorldLinkViewModel(application: Application) : AndroidViewModel(applicatio
     )
 
     val activeCall: StateFlow<ActiveCallState> = callManager.callState
+    val serverlessSignalCode: StateFlow<String?> = callManager.serverlessSignalCode
     val rtcTelemetry: StateFlow<RtcTelemetry> = webRtcEngine.telemetry
 
     val nearbyPeers: StateFlow<List<NearbyPeer>> = nearbyManager.peers
@@ -188,6 +189,13 @@ class WorldLinkViewModel(application: Application) : AndroidViewModel(applicatio
             )
             return
         }
+        if (!appPreferences.value.useBackendServer) {
+            _onboardingState.value = _onboardingState.value.copy(
+                availability = UsernameAvailability.AVAILABLE,
+                availabilityMessage = "@$clean will be saved locally in this app (zero server)"
+            )
+            return
+        }
         _onboardingState.value = _onboardingState.value.copy(
             availability = UsernameAvailability.CHECKING,
             availabilityMessage = "Checking global availability..."
@@ -268,15 +276,39 @@ class WorldLinkViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun setUseBackendServer(enabled: Boolean) {
+        viewModelScope.launch {
+            repo.setUseBackendServer(enabled)
+            if (_onboardingState.value.usernameInput.isNotBlank()) {
+                updateOnboardingUsername(_onboardingState.value.usernameInput)
+            }
+            _bannerFeedback.value = if (enabled) {
+                "Optional backend server enabled"
+            } else {
+                "In-app storage mode active (zero server)"
+            }
+        }
+    }
+
     fun testAndSaveServerConfig(
         serverBaseUrl: String,
         stunUrl: String,
         turnUrl: String,
         turnUsername: String,
-        turnCredential: String
+        turnCredential: String,
+        useBackendServer: Boolean? = null
     ) {
         viewModelScope.launch {
-            repo.saveServerConfig(serverBaseUrl, stunUrl, turnUrl, turnUsername, turnCredential)
+            repo.saveServerConfig(serverBaseUrl, stunUrl, turnUrl, turnUsername, turnCredential, useBackendServer)
+            if (useBackendServer == false) {
+                val msg = "Saved ICE/STUN settings. User data stays in-app (server disabled)."
+                _onboardingState.value = _onboardingState.value.copy(serverCheckStatus = msg)
+                _bannerFeedback.value = msg
+                if (_onboardingState.value.usernameInput.isNotBlank()) {
+                    updateOnboardingUsername(_onboardingState.value.usernameInput)
+                }
+                return@launch
+            }
             repo.testServerHealth(serverBaseUrl)
                 .onSuccess { status ->
                     _onboardingState.value = _onboardingState.value.copy(serverCheckStatus = status)
@@ -362,6 +394,14 @@ class WorldLinkViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun addLocalContact(username: String, displayName: String) {
+        viewModelScope.launch {
+            repo.addLocalContact(username, displayName)
+                .onSuccess { c -> _bannerFeedback.value = "Saved @${c.username} in-app" }
+                .onFailure { _bannerFeedback.value = it.message }
+        }
+    }
+
     fun addContact(peer: UserDto) {
         viewModelScope.launch {
             repo.addContact(peer)
@@ -406,6 +446,11 @@ class WorldLinkViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun startCall(peer: UserDto, kind: CallKind) {
+        if (!appPreferences.value.useBackendServer) {
+            val myHandle = session.value.username.ifBlank { "worldlink_user" }
+            callManager.createServerlessP2pOffer(myHandle, peer.username, kind)
+            return
+        }
         if (signalingState.value != SignalingConnectionState.CONNECTED) {
             _bannerFeedback.value = "Signaling server disconnected. Reconnecting before calling @${peer.username}..."
             viewModelScope.launch { repo.connectRealtimeIfSignedIn() }
@@ -414,14 +459,33 @@ class WorldLinkViewModel(application: Application) : AndroidViewModel(applicatio
         callManager.startOutgoingCall(peer, kind)
     }
 
+    fun createServerlessP2pOffer(peerUsername: String, kind: CallKind) {
+        val clean = peerUsername.trim().removePrefix("@").ifBlank { "friend" }
+        val myHandle = session.value.username.ifBlank { "worldlink_user" }
+        callManager.createServerlessP2pOffer(myHandle, clean, kind)
+    }
+
+    fun acceptServerlessP2pOffer(encodedOffer: String): Boolean {
+        val myHandle = session.value.username.ifBlank { "worldlink_user" }
+        val ok = callManager.acceptServerlessP2pOffer(myHandle, encodedOffer)
+        if (!ok) _bannerFeedback.value = "Invalid WorldLink P2P Offer code."
+        return ok
+    }
+
+    fun completeServerlessP2pAnswer(encodedAnswer: String): Boolean {
+        val ok = callManager.completeServerlessP2pAnswer(encodedAnswer)
+        if (!ok) _bannerFeedback.value = "Invalid WorldLink P2P Answer code."
+        return ok
+    }
+
     fun startScreenShareWithPermission(permissionIntent: Intent) {
         callManager.startScreenShare(permissionIntent)
     }
 
-    // Offline Nearby Actions
-    fun startNearbyDiscovery(hasWifiPerm: Boolean, hasBlePerm: Boolean) {
+    // Offline Nearby Actions (Wi-Fi Direct & Local Wi-Fi mDNS only, zero Bluetooth)
+    fun startNearbyDiscovery(hasWifiPerm: Boolean) {
         val name = session.value.username.ifBlank { "WorldLink_Guest" }
-        nearbyManager.startDiscovery(name, hasWifiPerm, hasBlePerm)
+        nearbyManager.startDiscovery(name, hasWifiPerm)
     }
 
     fun stopNearbyDiscovery() {

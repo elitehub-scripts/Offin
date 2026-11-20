@@ -73,7 +73,7 @@ fun OnboardingScreen(
     onRecoveryKeyChange: (String) -> Unit,
     onSubmitRegister: () -> Unit,
     onSubmitRecover: () -> Unit,
-    onSaveServerConfig: (String, String, String, String, String) -> Unit,
+    onSaveServerConfig: (String, String, String, String, String, Boolean) -> Unit,
     onOpenOfflineNearby: () -> Unit
 ) {
     var showServerDialog by remember { mutableStateOf(false) }
@@ -212,7 +212,7 @@ fun OnboardingScreen(
                 ) {
                     if (!state.isRecoveryMode) {
                         Text(
-                            text = "Claim Your Global Identity",
+                            text = if (appPreferences.useBackendServer) "Claim Global @username" else "Save Your Identity In-App",
                             style = MaterialTheme.typography.titleLarge
                         )
                         OutlinedTextField(
@@ -361,7 +361,7 @@ fun OnboardingScreen(
                 }
             }
 
-            // Offline Nearby Escape Hatch
+            // Offline Nearby Escape Hatch (Wi-Fi Direct / Local Wi-Fi only, No Bluetooth)
             OutlinedButton(
                 onClick = onOpenOfflineNearby,
                 modifier = Modifier
@@ -371,11 +371,15 @@ fun OnboardingScreen(
             ) {
                 Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Use Offline Nearby Mode (No Internet Needed)")
+                Text("Use Offline Wi-Fi Nearby (No Bluetooth)")
             }
 
             Text(
-                text = "Active endpoint: ${appPreferences.serverBaseUrl}",
+                text = if (appPreferences.useBackendServer) {
+                    "Mode: Optional Server (${appPreferences.serverBaseUrl})"
+                } else {
+                    "100% Free • Saved Locally In-App • No Bluetooth • Zero Server"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -388,8 +392,8 @@ fun OnboardingScreen(
             currentPrefs = appPreferences,
             statusNote = state.serverCheckStatus,
             onDismiss = { showServerDialog = false },
-            onSaveAndTest = { srv, stun, turn, user, pass ->
-                onSaveServerConfig(srv, stun, turn, user, pass)
+            onSaveAndTest = { srv, stun, turn, user, pass, useSrv ->
+                onSaveServerConfig(srv, stun, turn, user, pass, useSrv)
             }
         )
     }

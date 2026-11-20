@@ -1,6 +1,8 @@
 package com.example
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -13,16 +15,24 @@ import com.example.data.local.AppPreferences
 import com.example.data.local.CallRecordEntity
 import com.example.data.local.ContactEntity
 import com.example.data.local.MessageEntity
+import com.example.data.local.PreferencesStore
 import com.example.data.local.WorldLinkDatabase
 import com.example.data.remote.NetworkModule
+import com.example.data.remote.SignalingClient
+import com.example.data.repository.WorldLinkRepository
+import com.example.rtc.WebRtcEngine
 import com.example.ui.OnboardingUiState
 import com.example.ui.UsernameAvailability
 import com.example.ui.screens.OnboardingScreen
+import com.example.ui.screens.requiredCallPermissions
+import com.example.ui.screens.requiredNearbyPermissions
 import com.example.ui.theme.WorldLinkTheme
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -38,11 +48,12 @@ class ExampleRobolectricTest {
     @get:Rule
     val composeTestRule = createComposeRule()
 
+    private lateinit var context: Context
     private lateinit var db: WorldLinkDatabase
 
     @Before
     fun setUp() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        context = ApplicationProvider.getApplicationContext()
         db = Room.inMemoryDatabaseBuilder(context, WorldLinkDatabase::class.java)
             .allowMainThreadQueries()
             .build()
@@ -55,9 +66,57 @@ class ExampleRobolectricTest {
 
     @Test
     fun `app name is WorldLink`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
         assertEquals("WorldLink", appName)
+    }
+
+    @Test
+    fun `manifest and permission helpers contain zero Bluetooth permissions`() {
+        val callPerms = requiredCallPermissions(includeCamera = true).toList()
+        val nearbyPerms = requiredNearbyPermissions().toList()
+        assertTrue(callPerms.none { it.contains("BLUETOOTH", ignoreCase = true) })
+        assertTrue(nearbyPerms.none { it.contains("BLUETOOTH", ignoreCase = true) })
+        assertTrue(Manifest.permission.NEARBY_WIFI_DEVICES in nearbyPerms)
+
+        val pkgInfo = context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.GET_PERMISSIONS
+        )
+        val requested = pkgInfo.requestedPermissions?.toList().orEmpty()
+        assertFalse(requested.any { it.contains("BLUETOOTH", ignoreCase = true) })
+    }
+
+    @Test
+    fun `serverless P2P signal bundle encodes and decodes cleanly`() {
+        val rawSdp = "v=0\r\no=- 12345 2 IN IP4 127.0.0.1\r\ns=-\r\n"
+        val encoded = WebRtcEngine.encodeSignalBundle("Mahid_2026", "VIDEO", rawSdp)
+        assertTrue(encoded.startsWith("WL1:"))
+        val decoded = WebRtcEngine.decodeSignalBundle(encoded)
+        assertNotNull(decoded)
+        assertEquals("Mahid_2026", decoded!!.first)
+        assertEquals("VIDEO", decoded.second)
+        assertEquals(rawSdp, decoded.third)
+    }
+
+    @Test
+    fun `user identity and contacts save locally in-app without any backend server`() = runTest {
+        val prefs = PreferencesStore(context)
+        val repo = WorldLinkRepository(db.dao(), prefs, SignalingClient())
+
+        assertFalse(prefs.appPreferences.first().useBackendServer)
+
+        val regResult = repo.registerUsername("Mahid_2026", "Mahid")
+        assertTrue(regResult.isSuccess)
+        val savedSession = prefs.userSession.first()
+        assertTrue(savedSession.isSignedIn)
+        assertEquals("Mahid_2026", savedSession.username)
+        assertTrue(savedSession.recoveryKey.isNotBlank())
+
+        val contactResult = repo.addLocalContact("friend_london", "London Friend")
+        assertTrue(contactResult.isSuccess)
+        val contacts = db.dao().observeContacts().first()
+        assertEquals(1, contacts.size)
+        assertEquals("friend_london", contacts[0].username)
     }
 
     @Test
@@ -137,7 +196,7 @@ class ExampleRobolectricTest {
                     state = OnboardingUiState(
                         usernameInput = "Mahid_2026",
                         availability = UsernameAvailability.AVAILABLE,
-                        availabilityMessage = "@Mahid_2026 is available"
+                        availabilityMessage = "@Mahid_2026 will be saved locally in this app (zero server)"
                     ),
                     appPreferences = AppPreferences(),
                     onUsernameChange = {},
@@ -147,7 +206,7 @@ class ExampleRobolectricTest {
                     onRecoveryKeyChange = {},
                     onSubmitRegister = {},
                     onSubmitRecover = {},
-                    onSaveServerConfig = { _, _, _, _, _ -> },
+                    onSaveServerConfig = { _, _, _, _, _, _ -> },
                     onOpenOfflineNearby = {}
                 )
             }

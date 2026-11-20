@@ -93,6 +93,7 @@ fun ChatsTab(
     recentCalls: List<CallRecordEntity>,
     signalingState: SignalingConnectionState,
     hasInternet: Boolean,
+    useBackendServer: Boolean = false,
     onOpenChat: (UserDto) -> Unit,
     onStartCall: (UserDto, CallKind) -> Unit,
     onOpenContactsSearch: () -> Unit,
@@ -129,7 +130,7 @@ fun ChatsTab(
                         UserAvatar(
                             username = session.username,
                             avatarColorHex = session.avatarColor,
-                            isOnline = signalingState == SignalingConnectionState.CONNECTED,
+                            isOnline = if (useBackendServer) signalingState == SignalingConnectionState.CONNECTED else hasInternet,
                             size = 50.dp
                         )
                         Column(modifier = Modifier.weight(1f)) {
@@ -147,14 +148,15 @@ fun ChatsTab(
                         ConnectionStatusPill(
                             signalingState = signalingState,
                             hasInternet = hasInternet,
+                            useBackendServer = useBackendServer,
                             onClick = onRefresh
                         )
                     }
                 }
             }
 
-            // Honest Server Unavailability Notice
-            if (!hasInternet || signalingState == SignalingConnectionState.UNAVAILABLE) {
+            // Honest Network / Server Notice
+            if (!hasInternet || (useBackendServer && signalingState == SignalingConnectionState.UNAVAILABLE)) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -169,9 +171,9 @@ fun ChatsTab(
                             Icon(Icons.Default.WarningAmber, contentDescription = null, tint = AmberWarn)
                             Text(
                                 text = if (!hasInternet) {
-                                    "No internet connection. Global chats are cached; use Nearby tab for offline local wireless communication."
+                                    "No internet connection. User & chats are saved in-app; use the Nearby tab for local Wi-Fi Direct chat (~30–100m range)."
                                 } else {
-                                    "WorldLink signaling server unreachable. Configure your server URL in Settings or tap status to retry."
+                                    "Optional WorldLink server unreachable. Disable it in Settings for pure in-app + P2P mode or retry."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.weight(1f)
